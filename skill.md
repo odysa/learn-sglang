@@ -292,7 +292,7 @@ Write the HTML app as a single self-contained file. Architecture:
 ```
 
 **Required UI features**:
-- Dark theme with CSS custom properties (easy to restyle)
+- Light theme with CSS custom properties (easy to restyle) — warm parchment canvas, Claude design system
 - Sidebar with numbered chapter list, active/completed state
 - Mobile responsive (sidebar collapses to hamburger menu)
 - Smooth chapter transitions (fade + slide animation)
@@ -321,7 +321,7 @@ and explanatory code blocks. Use a dedicated `.source-code` component:
 ```
 
 Styling rules:
-- **Border**: Left border accent (e.g., 3px solid var(--cyan)) to distinguish from
+- **Border**: Left border accent (e.g., 3px solid var(--accent)) to distinguish from
   pseudocode blocks (which use a plain background with no accent border)
 - **Header bar**: Shows `SOURCE CODE` tag + file path + line range. Monospace,
   smaller font. The file path should be visually prominent so the reader can
