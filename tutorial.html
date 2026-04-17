@@ -238,6 +238,22 @@ p code, li code {
 /* Progress bar */
 .progress-bar { height: 3px; background: var(--border); border-radius: 2px; margin-top: auto; }
 .progress-fill { height: 100%; background: var(--accent); border-radius: 2px; transition: width 0.3s; }
+
+/* Compare tables */
+.compare-table { width: 100%; border-collapse: collapse; margin: 20px 0; font-size: 14px; border-radius: 12px; overflow: hidden; border: 1px solid var(--border-strong); }
+.compare-table th { background: var(--bg-tertiary); padding: 10px 16px; text-align: left; font-weight: 600; color: var(--text-bright); font-size: 13px; }
+.compare-table td { padding: 10px 16px; border-top: 1px solid var(--border); }
+.compare-table tr.chosen { background: rgba(201,100,66,0.06); }
+.compare-table tr.chosen td:last-child { color: var(--accent); font-weight: 600; }
+
+/* Further Reading */
+.further-reading { background: var(--bg-secondary); border: 1px solid var(--border-strong); border-radius: 12px; padding: 20px 24px; margin: 28px 0; }
+.further-reading h4 { font-family: Georgia, serif; font-weight: 500; font-size: 16px; margin-bottom: 12px; color: var(--text-bright); }
+.further-reading ul { list-style: none; padding: 0; }
+.further-reading li { margin-bottom: 10px; line-height: 1.55; font-size: 14px; }
+.further-reading a { color: var(--accent); text-decoration: none; font-weight: 500; }
+.further-reading a:hover { text-decoration: underline; }
+.paper-meta { color: var(--text-tertiary); font-size: 12px; margin-left: 4px; }
 </style>
 </head>
 <body>
@@ -272,6 +288,15 @@ p code, li code {
 <p>SGLang decomposes LLM serving into <strong>three asynchronous processes</strong> connected by ZMQ message-passing:</p>
 <p><strong>TokenizerManager</strong> receives HTTP requests, tokenizes text, and handles multimodal inputs. <strong>Scheduler</strong> manages batching, KV cache allocation, and GPU execution. <strong>DetokenizerManager</strong> converts output tokens back to text and streams results.</p>
 <p>This means tokenization of new requests overlaps with GPU computation on current requests, which overlaps with detokenization of completed requests. No stage blocks another.</p>
+
+<h3>Why Separate Processes, Not Async Tasks?</h3>
+<table class="compare-table">
+<thead><tr><th>Approach</th><th>GIL Contention</th><th>Crash Isolation</th><th>CPU/GPU Separation</th><th>Verdict</th></tr></thead>
+<tbody>
+<tr class="chosen"><td>Separate processes + ZMQ</td><td>None (each has own GIL)</td><td>One crash doesn't kill others</td><td>Clean boundary</td><td>Chosen</td></tr>
+<tr><td>Async tasks in one process</td><td>GIL serializes CPU work</td><td>One crash kills everything</td><td>Shared memory contention</td><td>Too fragile</td></tr>
+</tbody>
+</table>
 
 <h3>How It Works</h3>
 <p>A request's journey through SGLang follows this pipeline. Each arrow represents a boundary where work can be pipelined &mdash; while the scheduler runs a GPU forward pass on batch N, the tokenizer is already preparing batch N+1, and the detokenizer is streaming results from batch N-1.</p>
@@ -360,6 +385,13 @@ p code, li code {
   </div>
 </div>
 
+<div class="further-reading">
+  <h4>Further Reading</h4>
+  <ul>
+    <li><a href="https://arxiv.org/abs/2312.07104" target="_blank" rel="noopener">SGLang: Efficient Execution of Structured Language Model Programs</a> <span class="paper-meta">Zheng et al., 2024</span> — Introduced the SGLang system, RadixAttention, and the structured generation language.</li>
+  </ul>
+</div>
+
 <div class="callout callout-success">
   <strong>Key Takeaway:</strong> SGLang's architecture is a three-stage async pipeline. The TokenizerManager, Scheduler, and DetokenizerManager run as independent processes via ZMQ. CPU-bound tokenization never blocks GPU-bound inference.
 </div>
@@ -438,6 +470,23 @@ p code, li code {
 <h3>The Idea</h3>
 <p><strong>ReqToTokenPool</strong> is a 2D table mapping each request to its KV slot indices. <strong>TokenToKVPoolAllocator</strong> manages a free list of physical KV indices. This two-level design decouples logical structure from physical storage, enabling non-contiguous allocation with zero fragmentation.</p>
 
+<div class="callout callout-info">
+  <strong>What is a KV Cache?</strong> In transformer inference, each token's attention computation produces Key and Value vectors. To avoid recomputing them on every generation step, they're stored in a cache. For Llama 70B at 4K context, a single request's KV cache consumes ~1.3 GB of GPU memory. The KV cache is the dominant memory consumer in LLM serving &mdash; managing it efficiently is the difference between serving 10 requests and 1,000.
+</div>
+
+<div class="callout callout-info">
+  <strong>What is Paged Memory?</strong> Like virtual memory in an OS &mdash; logical addresses map to physical pages via a page table. SGLang's <code>req_to_token</code> tensor IS the page table: <code>req_to_token[req_slot, token_pos] = physical_kv_index</code>. This indirection means requests can use non-contiguous physical memory without knowing or caring.
+</div>
+
+<h3>Why Paged Pools, Not Contiguous Allocation?</h3>
+<table class="compare-table">
+<thead><tr><th>Approach</th><th>Fragmentation</th><th>Prefix Sharing</th><th>Memory Waste</th><th>Verdict</th></tr></thead>
+<tbody>
+<tr class="chosen"><td>Two-level paged pool</td><td>Zero</td><td>Natural (shared indices)</td><td>None (per-token alloc)</td><td>Chosen</td></tr>
+<tr><td>Contiguous pre-allocation</td><td>Severe</td><td>Impossible</td><td>High (max_len padding)</td><td>Wastes memory</td></tr>
+</tbody>
+</table>
+
 <h3>Source Code</h3>
 <div class="source-code">
   <div class="source-header">
@@ -484,6 +533,13 @@ p code, li code {
   </div>
 </div>
 
+<div class="further-reading">
+  <h4>Further Reading</h4>
+  <ul>
+    <li><a href="https://arxiv.org/abs/2309.06180" target="_blank" rel="noopener">Efficient Memory Management for Large Language Model Serving with PagedAttention</a> <span class="paper-meta">Kwon et al., 2023</span> — Introduced paged KV cache management for LLM serving (vLLM). SGLang builds on this with radix tree indexing.</li>
+  </ul>
+</div>
+
 <div class="callout callout-success">
   <strong>Key Takeaway:</strong> Two pools, zero fragmentation. <code>ReqToTokenPool</code> maps requests to tokens; <code>TokenToKVPoolAllocator</code> manages physical indices. Non-contiguous allocation is invisible to attention kernels.
 </div>
@@ -503,6 +559,19 @@ p code, li code {
 
 <h3>The Idea</h3>
 <p>The <strong>RadixCache</strong> stores KV data in a radix tree. Each node holds a token segment and KV indices. Prefix matching walks the tree comparing tokens. Node splitting handles partial matches. Only leaf nodes are evicted (LRU/LFU/priority).</p>
+
+<div class="callout callout-info">
+  <strong>What is a Radix Tree?</strong> A radix tree (also called a compressed trie) stores sequences by sharing common prefixes. Instead of one node per token, each node holds a <em>segment</em> of tokens. The path from root to any node represents a complete prefix. The key property: prefix matching is <strong>incremental</strong> &mdash; once you've matched N tokens, checking token N+1 costs O(1), just follow one child edge. This is fundamentally different from a hash table, where checking a prefix of length N requires hashing all N tokens every time.
+</div>
+
+<h3>Why Radix Tree, Not Hash Table?</h3>
+<table class="compare-table">
+<thead><tr><th>Approach</th><th>Prefix Lookup</th><th>Partial Matching</th><th>Memory Sharing</th><th>Verdict</th></tr></thead>
+<tbody>
+<tr class="chosen"><td>Radix tree</td><td>O(1) incremental per token</td><td>Natural (split nodes)</td><td>Automatic (shared path)</td><td>Chosen</td></tr>
+<tr><td>Hash table</td><td>O(N) per lookup (hash entire prefix)</td><td>None (exact match only)</td><td>Manual dedup needed</td><td>Too slow for long prefixes</td></tr>
+</tbody>
+</table>
 
 <h3>Source Code</h3>
 <div class="source-code">
@@ -549,6 +618,13 @@ p code, li code {
   </div>
 </div>
 
+<div class="further-reading">
+  <h4>Further Reading</h4>
+  <ul>
+    <li><a href="https://arxiv.org/abs/2312.07104" target="_blank" rel="noopener">SGLang: Efficient Execution of Structured Language Model Programs</a> <span class="paper-meta">Zheng et al., 2024</span> — Introduced RadixAttention: radix tree-based KV cache for automatic prefix sharing across requests.</li>
+  </ul>
+</div>
+
 <div class="callout callout-success">
   <strong>Key Takeaway:</strong> Radix trees give you the <em>longest</em> prefix match, not just an exact match. For shared system prompts, this eliminates 70-90% of prefill computation.
 </div>
@@ -568,6 +644,15 @@ p code, li code {
 
 <h3>The Idea</h3>
 <p>SGLang defaults to <strong>LPM (Longest Prefix Match)</strong>, which sorts the waiting queue so requests with the longest RadixCache prefix hit go first. Instead of computing 4096 tokens of prefill, a request might only need 512 new tokens because the other 3584 are already cached. Alternative policies include FCFS (first-come-first-served), LOF (longest output first), and DFS-Weight.</p>
+
+<h3>Why LPM, Not FCFS?</h3>
+<table class="compare-table">
+<thead><tr><th>Policy</th><th>Cache Utilization</th><th>Fairness</th><th>Overhead</th><th>Verdict</th></tr></thead>
+<tbody>
+<tr class="chosen"><td>LPM (Longest Prefix Match)</td><td>Maximizes reuse</td><td>May delay new prompts</td><td>O(N) prefix scan</td><td>Default</td></tr>
+<tr><td>FCFS (First Come First Served)</td><td>Ignores cache</td><td>Perfect fairness</td><td>O(1)</td><td>Fallback when queue &gt; 128</td></tr>
+</tbody>
+</table>
 <p>Two queues govern the flow. The <strong>waiting queue</strong> holds requests that have arrived but not yet begun prefill. The <strong>running batch</strong> holds requests in the decode phase. Every iteration, the scheduler decides how many new requests to promote from waiting into a prefill batch, without starving decode.</p>
 
 <h3>How It Works</h3>
@@ -621,6 +706,13 @@ logits = model_runner.forward(batch)
     <span class="kw">return</span> prefix_computed</code></pre>
 </div>
 
+<div class="further-reading">
+  <h4>Further Reading</h4>
+  <ul>
+    <li><a href="https://www.usenix.org/conference/osdi22/presentation/yu" target="_blank" rel="noopener">Orca: A Distributed Serving System for Transformer-Based Generative Models</a> <span class="paper-meta">Yu et al., 2022 &mdash; OSDI '22</span> — Introduced iteration-level scheduling (continuous batching) for transformer serving.</li>
+  </ul>
+</div>
+
 <div class="callout callout-success">
   <strong>Key Takeaway:</strong> LPM scheduling is what makes RadixCache pay off. Without it, cached prefixes go unused because unrelated requests get scheduled first.
 </div>
@@ -639,8 +731,22 @@ logits = model_runner.forward(batch)
 <p>A long prefill (100K context) blocks all decode requests, spiking TTFB for everyone. Traditional batching waits for all requests to finish before starting the next batch.</p>
 
 <h3>The Idea</h3>
-<p><strong>Continuous batching</strong> eliminates the synchronization barrier. Instead of waiting for every request in a batch to finish, the scheduler checks after every forward pass: which requests finished? Remove them. Which new requests are waiting? Add them. The batch composition changes fluidly, iteration to iteration.</p>
-<p><strong>Chunked prefill</strong> takes this further. A 100K-token prefill would monopolize the GPU for hundreds of milliseconds. Chunked prefill slices it into pieces (e.g., 8192 tokens per chunk). Between chunks, decode requests get their turn. The long prefill resumes next iteration, picking up where it left off.</p>
+<div class="callout callout-info">
+  <strong>What is Continuous Batching?</strong> In static batching, the GPU processes a fixed batch and waits for ALL requests to finish before starting the next. In continuous batching, the scheduler checks after every forward pass: which requests finished? Remove them. Which new requests are waiting? Add them. The batch composition changes fluidly, iteration to iteration. No synchronization barrier.
+</div>
+
+<div class="callout callout-info">
+  <strong>What is Chunked Prefill?</strong> A 100K-token prompt would monopolize the GPU for hundreds of milliseconds if prefilled all at once. Chunked prefill slices it into pieces (e.g., 8192 tokens per chunk). Between chunks, decode requests get their turn. The long prefill resumes next iteration, picking up exactly where it left off. TTFB becomes bounded by chunk size, not input length.
+</div>
+
+<h3>Why Continuous + Chunked, Not Static Batching?</h3>
+<table class="compare-table">
+<thead><tr><th>Approach</th><th>GPU Utilization</th><th>TTFB</th><th>Complexity</th><th>Verdict</th></tr></thead>
+<tbody>
+<tr class="chosen"><td>Continuous + chunked</td><td>Near 100%</td><td>Bounded by chunk size</td><td>Medium</td><td>Chosen</td></tr>
+<tr><td>Static batching</td><td>Low (waits for slowest)</td><td>Unbounded</td><td>Simple</td><td>Too wasteful</td></tr>
+</tbody>
+</table>
 
 <h3>How It Works</h3>
 <p><strong>Step 1: Prefill completes, merge into decode.</strong> After a prefill forward pass finishes, completed requests join the running decode batch. This is the "continuous" part &mdash; new decode requests join mid-stream, no synchronization needed.</p>
@@ -699,9 +805,20 @@ logits = model.forward(combined)</code></pre>
 <p>Hundreds of small CUDA kernels per forward pass mean significant launch overhead, especially during decode when each request contributes just one token. The model runner minimizes this through CUDA graph caching.</p>
 
 <h3>The Idea</h3>
-<p>SGLang's <code>ModelRunner</code> sits between the scheduler and GPU. It receives a <code>ForwardBatch</code> and dispatches to one of three paths:</p>
-<p><strong>Extend mode (prefill):</strong> Process multiple input tokens per request. Compute-heavy, runs fresh kernels since batch shapes vary widely. <strong>Decode mode:</strong> Process one new token per request. Batch shapes repeat frequently, making this ideal for CUDA graph replay. <strong>Idle mode:</strong> Pipeline parallelism synchronization when this stage has no work.</p>
-<p><strong>CUDA graphs</strong> are the critical optimization. On the first decode with a given batch shape, the model runner records every GPU operation into a graph. On subsequent decodes with the same shape, it replays the graph in a single kernel launch, bypassing all per-operation overhead. This reduces decode latency by 2-3x at small batch sizes.</p>
+<p>SGLang's <code>ModelRunner</code> sits between the scheduler and GPU. It receives a <code>ForwardBatch</code> and dispatches to one of three paths: <strong>Extend</strong> (prefill, many tokens), <strong>Decode</strong> (one token), or <strong>Idle</strong> (pipeline sync).</p>
+
+<div class="callout callout-info">
+  <strong>What is a CUDA Graph?</strong> A recorded sequence of GPU operations that can be replayed as a single unit. Instead of the CPU telling the GPU "do matmul, then layernorm, then attention..." for each of 80 layers, the entire sequence is captured once and replayed in one launch. The GPU never waits for CPU instructions between operations. At small batch sizes where kernel launch overhead dominates, this reduces decode latency by 2-3x.
+</div>
+
+<h3>Why CUDA Graphs, Not torch.compile?</h3>
+<table class="compare-table">
+<thead><tr><th>Approach</th><th>Latency Reduction</th><th>Flexibility</th><th>Warmup Cost</th><th>Verdict</th></tr></thead>
+<tbody>
+<tr class="chosen"><td>CUDA graph replay</td><td>2-3x for decode</td><td>Fixed shapes only</td><td>Per-shape capture</td><td>Default for decode</td></tr>
+<tr><td>torch.compile</td><td>Variable</td><td>Dynamic shapes</td><td>Compilation time</td><td>Used for extend/prefill</td></tr>
+</tbody>
+</table>
 
 <h3>How It Works</h3>
 <p><strong>Stage 1: Dispatch.</strong> <code>_forward_raw</code> checks three conditions for CUDA graph eligibility: decode mode, GraphRunner initialized, and batch shape matches a captured graph. If all three, replay.</p>
@@ -765,6 +882,20 @@ logits = model.forward(combined)</code></pre>
 <p>Attention is up to 70% of inference compute. Different hardware needs different kernels. A serving system needs a pluggable abstraction so new backends can be integrated without touching model code.</p>
 
 <h3>The Idea</h3>
+<div class="callout callout-info">
+  <strong>What is Flash Attention?</strong> An IO-aware attention algorithm that tiles the Q/K/V computation to keep data in fast GPU SRAM instead of slow HBM. Standard attention reads/writes O(N&sup2;) to HBM; Flash Attention reduces this to O(N) while computing <em>exact</em> (not approximate) attention. The key insight: recompute softmax statistics during the backward pass instead of storing them &mdash; trade cheap FLOPs for expensive memory bandwidth.
+</div>
+
+<h3>Why Pluggable Backends?</h3>
+<table class="compare-table">
+<thead><tr><th>Backend</th><th>Hardware</th><th>Speed</th><th>Portability</th><th>Verdict</th></tr></thead>
+<tbody>
+<tr class="chosen"><td>FlashInfer</td><td>NVIDIA</td><td>Fastest</td><td>NVIDIA only</td><td>Default</td></tr>
+<tr><td>Triton</td><td>Any GPU</td><td>10-20% slower</td><td>Portable</td><td>AMD/Intel fallback</td></tr>
+<tr><td>TorchNative</td><td>Any</td><td>Slowest</td><td>Universal</td><td>Debug only</td></tr>
+</tbody>
+</table>
+
 <p>SGLang uses a two-layer design. The <strong>model-facing layer</strong> is <code>RadixAttention</code>, a PyTorch module that every transformer layer calls. It reshapes Q, K, V tensors, optionally saves KV to cache, and delegates computation to whatever backend is active. The model code never imports FlashInfer or Triton directly.</p>
 <p>The <strong>backend layer</strong> is the <code>AttentionBackend</code> abstract class. Each concrete backend implements three methods: <code>init_forward_metadata</code> (precompute KV index structures), <code>forward_decode</code> (single-token against full KV cache), and <code>forward_extend</code> (multi-token for prefill with partially populated KV).</p>
 
@@ -833,6 +964,15 @@ output = radix_attention.forward(q, k, v, forward_batch)
     <span class="kw">def</span> <span class="fn">forward_extend</span>(self, q, k, v, layer, forward_batch): ...  <span class="an"># &larr; N tokens vs partial KV</span></code></pre>
 </div>
 
+<div class="further-reading">
+  <h4>Further Reading</h4>
+  <ul>
+    <li><a href="https://arxiv.org/abs/2205.14135" target="_blank" rel="noopener">FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness</a> <span class="paper-meta">Dao et al., 2022</span> — The IO-aware tiling algorithm that made efficient attention practical.</li>
+    <li><a href="https://arxiv.org/abs/2307.08691" target="_blank" rel="noopener">FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning</a> <span class="paper-meta">Dao, 2023</span> — Improved parallelism and 2x speedup over FlashAttention.</li>
+    <li><a href="https://arxiv.org/abs/2501.01005" target="_blank" rel="noopener">FlashInfer: Efficient and Customizable Attention Engine for LLM Inference Serving</a> <span class="paper-meta">Ye et al., 2025</span> — The batched attention kernel library SGLang uses as its default backend.</li>
+  </ul>
+</div>
+
 <div class="callout callout-success">
   <strong>Key Takeaway:</strong> The <code>AttentionBackend</code> abstraction decouples kernel innovation from model logic. SGLang can adopt new kernels in days by implementing three methods.
 </div>
@@ -851,6 +991,10 @@ output = radix_attention.forward(q, k, v, forward_batch)
 <p>After the forward pass, the model produces a logit vector over the full vocabulary. Greedy picks are repetitive; pure random is incoherent. Each request in a batch may have different sampling preferences.</p>
 
 <h3>The Idea</h3>
+<div class="callout callout-info">
+  <strong>What is Nucleus (Top-P) Sampling?</strong> Sort tokens by descending probability. Keep the smallest set whose cumulative probability exceeds p (e.g., 0.95). When the model is confident, few tokens survive; when uncertain, many do. This adapts the candidate pool to the model's certainty &mdash; unlike top-k which always keeps exactly k tokens regardless of the probability landscape.
+</div>
+
 <p>Sampling is a three-stage pipeline: <strong>scale</strong>, <strong>filter</strong>, <strong>pick</strong>. Temperature scaling controls distribution spread (0.1 = very confident, 2.0 = nearly uniform). Filtering &mdash; top-k, top-p (nucleus), and min-p &mdash; prunes away low-probability tokens. Finally, the surviving probabilities are normalized and a token is drawn via <code>torch.multinomial</code>.</p>
 <p>The catch: SGLang serves a <em>batch</em> of requests, each with different parameters. <code>SamplingBatchInfo</code> packs per-request params into GPU tensors for vectorized execution. When all requests are greedy, a boolean flag <code>is_all_greedy</code> skips the entire softmax-filter-sample pipeline, jumping straight to <code>argmax</code>.</p>
 
@@ -944,9 +1088,24 @@ multinomial(probs, 1) &rarr; token_ids</code></pre>
 <p>Models <em>usually</em> produce valid JSON, but "usually" is not enough for production. Retry-on-failure wastes GPU time. Constrained decoding makes invalid output <strong>structurally impossible</strong>.</p>
 
 <h3>The Idea</h3>
-<p>Constrained decoding runs a <strong>finite state machine (FSM)</strong> alongside the language model. The FSM encodes the grammar of the target format &mdash; JSON schema, regex, or context-free grammar. At each step, the FSM computes a <strong>vocabulary mask</strong>: a binary vector where 1 = allowed, 0 = forbidden. The mask is applied before sampling, setting forbidden tokens to negative infinity.</p>
-<p><strong>XGrammar</strong> is the fastest backend: it compiles grammars into optimized FSMs at startup and computes masks via bit-level operations. <strong>Outlines</strong> provides a Python regex-to-FSM fallback. Compilation is async + cached &mdash; the first request pays compilation cost; subsequent requests reuse instantly.</p>
-<p><strong>Jump-forward decoding</strong> is a particularly clever optimization. When the FSM reaches a state where only one continuation is valid (e.g., after <code>{&quot;name&quot;: </code> the next character must be <code>&quot;</code>), the system skips sampling and emits deterministic tokens directly, sometimes skipping 5-10 tokens in one jump.</p>
+
+<div class="callout callout-info">
+  <strong>What is an FSM (Finite State Machine)?</strong> A model with discrete states and transitions triggered by inputs. For JSON decoding, states include EXPECT_KEY, IN_STRING, EXPECT_COLON, EXPECT_VALUE. At each state, only certain tokens are valid. The FSM computes a vocabulary mask &mdash; a binary vector over all 128K tokens &mdash; that zeros out invalid choices before sampling.
+</div>
+
+<p>Constrained decoding runs an FSM alongside the language model. At each step, it computes allowed tokens as a <strong>vocabulary mask</strong> (1 = allowed, 0 = forbidden), applied before sampling by setting forbidden logits to negative infinity.</p>
+
+<h3>Why FSM Masking, Not Retry-on-Invalid?</h3>
+<table class="compare-table">
+<thead><tr><th>Approach</th><th>GPU Waste</th><th>Guarantee</th><th>Latency</th><th>Verdict</th></tr></thead>
+<tbody>
+<tr class="chosen"><td>FSM vocabulary masking</td><td>Zero</td><td>Structural (impossible to fail)</td><td>Same as unconstrained</td><td>Chosen</td></tr>
+<tr><td>Retry on invalid output</td><td>2-10x</td><td>Probabilistic (may never converge)</td><td>Unbounded</td><td>Unreliable</td></tr>
+</tbody>
+</table>
+
+<p><strong>XGrammar</strong> is the fastest backend: compiles grammars into optimized FSMs with bit-level mask operations. <strong>Outlines</strong> provides a Python regex-to-FSM fallback. Compilation is async + cached &mdash; the first request pays the cost; subsequent requests reuse instantly.</p>
+<p><strong>Jump-forward decoding</strong>: When the FSM reaches a state where only one continuation is valid (e.g., after <code>{&quot;name&quot;: </code> the next character must be <code>&quot;</code>), the system skips sampling entirely and emits deterministic tokens directly, sometimes skipping 5-10 tokens in one jump.</p>
 
 <h3>How It Works</h3>
 <p>The constrained pipeline integrates at three points in the decode loop:</p>
@@ -989,6 +1148,13 @@ For each decode step:
         <span class="kw">return</span> grammar.clone()</code></pre>
 </div>
 
+<div class="further-reading">
+  <h4>Further Reading</h4>
+  <ul>
+    <li><a href="https://arxiv.org/abs/2305.13971" target="_blank" rel="noopener">Grammar-Constrained Decoding for Structured NLP Tasks without Finetuning</a> <span class="paper-meta">Geng et al., 2023</span> — Foundational work on using formal grammars to constrain LLM token generation.</li>
+  </ul>
+</div>
+
 <div class="callout callout-success">
   <strong>Key Takeaway:</strong> Constrained decoding makes invalid output impossible via FSM vocabulary masking. Jump-forward turns constraints into an optimization, not a tax.
 </div>
@@ -1007,6 +1173,20 @@ For each decode step:
 <p>A 70B model in FP16 needs 140 GB &mdash; far more than one GPU. Even if the model fits, one GPU cannot serve production traffic. You need to either split the model or replicate it.</p>
 
 <h3>The Idea</h3>
+<div class="callout callout-info">
+  <strong>What is Tensor Parallelism?</strong> Split each layer's weight matrices across N GPUs. With 64 attention heads and TP=4, each GPU handles 16 heads and computes its shard independently. After each layer, GPUs synchronize via <strong>AllReduce</strong> &mdash; a collective operation that sums partial results across GPUs and distributes the total back. The communication cost per layer: one <code>[batch, seq_len, hidden_dim]</code> tensor. Over NVLink (900 GB/s) this takes microseconds; over Ethernet it becomes the bottleneck.
+</div>
+
+<h3>Why TP + DP, Not Just One?</h3>
+<table class="compare-table">
+<thead><tr><th>Strategy</th><th>Fits Larger Models</th><th>Throughput Scaling</th><th>Communication</th><th>Verdict</th></tr></thead>
+<tbody>
+<tr><td>Tensor Parallelism only</td><td>Yes (split weights)</td><td>Limited by AllReduce</td><td>Per-layer, needs NVLink</td><td>For models &gt; 1 GPU</td></tr>
+<tr><td>Data Parallelism only</td><td>No (full replica)</td><td>Linear</td><td>None during inference</td><td>For throughput</td></tr>
+<tr class="chosen"><td>Hybrid DP + TP</td><td>Yes</td><td>Linear &times; TP groups</td><td>Within TP group only</td><td>Production default</td></tr>
+</tbody>
+</table>
+
 <p><strong>Tensor Parallelism (TP)</strong> splits a single model across N GPUs. Each GPU holds 1/N of attention heads and 1/N of MLP width. After each layer, GPUs synchronize via <strong>AllReduce</strong> &mdash; a collective op that sums partial results. TP is the standard for models exceeding single-GPU memory. The tradeoff: AllReduce happens after every layer (twice &mdash; after attention and after MLP), so NVLink bandwidth (900 GB/s) is essential.</p>
 <p><strong>Data Parallelism (DP)</strong> replicates the entire model on N independent GPU groups. A <code>DataParallelController</code> routes requests to the least-loaded worker. Throughput scales linearly &mdash; no inter-replica communication during inference. Cost: each replica needs full model weights + KV cache.</p>
 <p><strong>Hybrid DP+TP:</strong> With 8 GPUs, run 2 DP replicas each using 4-way TP. DP routes requests to replicas; within each replica, TP splits the model. This serves models too large for 4 GPUs while doubling throughput.</p>
@@ -1054,6 +1234,13 @@ DataParallelController
             <span class="kw">return</span> min(range(self.dp_size), key=<span class="kw">lambda</span> i: self.workers[i].queue_size)</code></pre>
 </div>
 
+<div class="further-reading">
+  <h4>Further Reading</h4>
+  <ul>
+    <li><a href="https://arxiv.org/abs/1909.08053" target="_blank" rel="noopener">Megatron-LM: Training Multi-Billion Parameter Language Models Using Model Parallelism</a> <span class="paper-meta">Shoeybi et al., 2019</span> — The foundational paper on tensor parallelism for large language models.</li>
+  </ul>
+</div>
+
 <div class="callout callout-success">
   <strong>Key Takeaway:</strong> TP lets you serve models that don't fit on one GPU (AllReduce per layer). DP gives linear throughput scaling (independent replicas). Most deployments use both.
 </div>
@@ -1072,6 +1259,19 @@ DataParallelController
 <p>Autoregressive decoding is serial: each token requires a full forward pass. For large models, this is memory-bandwidth bound &mdash; the GPU waits for 140 GB of weights to stream from HBM. You pay the full cost to generate one token.</p>
 
 <h3>The Idea</h3>
+<div class="callout callout-info">
+  <strong>What is Speculative Decoding?</strong> The key insight is that loading model weights from memory costs the same for 1 token or K tokens &mdash; the bottleneck is memory bandwidth, not compute. Large model inference is <em>memory-bandwidth bound</em>: you pay the full cost of streaming 140 GB of weights through the memory bus to generate a single token. The GPU's compute cores are mostly idle, waiting for data. Speculative decoding exploits this by verifying K tokens for the price of ~1.
+</div>
+
+<h3>Why Speculate, Not Just Decode Normally?</h3>
+<table class="compare-table">
+<thead><tr><th>Approach</th><th>Tokens per Target Forward</th><th>Cost</th><th>Net Speedup</th><th>Verdict</th></tr></thead>
+<tbody>
+<tr class="chosen"><td>Speculative (K=5, 80% accept)</td><td>~5 tokens</td><td>1 draft + 1 target pass</td><td>2-4x</td><td>Chosen for large models</td></tr>
+<tr><td>Standard autoregressive</td><td>1 token</td><td>1 target pass</td><td>1x (baseline)</td><td>Simple, always correct</td></tr>
+</tbody>
+</table>
+
 <p>Speculative decoding exploits the fact that a small <strong>draft model</strong> (1B params) can predict what a large <strong>target model</strong> (70B) would generate with 70-80% accuracy. Let the draft model sprint ahead and generate K candidates quickly. Feed all K to the target model in a <strong>single forward pass</strong> &mdash; this works because the target can process K tokens in parallel, like processing a prompt. Accept consecutive matches, reject the first mismatch, sample a <strong>bonus token</strong> at the rejection point. Net speedup: 2-4x.</p>
 <p>SGLang supports <strong>EAGLE</strong> (tree-structured drafting from target hidden states &mdash; explores multiple branches simultaneously), <strong>N-gram</strong> (frequency-based, zero-cost, no extra model), and <strong>DFlash</strong> (block-structured with hidden state reuse).</p>
 
@@ -1135,6 +1335,14 @@ Speculative decoding: [draft &times;5] &rarr; [target verifies 5] &rarr; accept 
     <div class="stat-box"><div class="stat-value" id="spec-rate">-</div><div class="stat-label">Accept Rate</div></div>
     <div class="stat-box"><div class="stat-value" id="spec-speedup">-</div><div class="stat-label">Speedup</div></div>
   </div>
+</div>
+
+<div class="further-reading">
+  <h4>Further Reading</h4>
+  <ul>
+    <li><a href="https://arxiv.org/abs/2211.17192" target="_blank" rel="noopener">Fast Inference from Transformers via Speculative Decoding</a> <span class="paper-meta">Leviathan et al., 2023</span> — Introduced the draft-then-verify paradigm for LLM inference acceleration.</li>
+    <li><a href="https://arxiv.org/abs/2401.15077" target="_blank" rel="noopener">EAGLE: Speculative Sampling Requires Rethinking Feature Uncertainty</a> <span class="paper-meta">Li et al., 2024</span> — Tree-structured speculative decoding using target model hidden states. Implemented in SGLang's speculative module.</li>
+  </ul>
 </div>
 
 <div class="callout callout-success">
