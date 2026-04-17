@@ -265,6 +265,46 @@ Dispatch **1 reviewer subagent** role-playing the target audience (beginner/inte
 
 ## Phase 4: Interactive HTML Generation
 
+### Step 4.0: Load the Design System
+
+**Before writing any HTML or CSS**, check for a `DESIGN.md` file in the project root:
+
+```
+if DESIGN.md exists:
+    Read the full file and extract:
+    - Color palette (background, surface, text, accent, semantic colors)
+    - Typography (font families, sizes, weights, line-heights)
+    - Spacing scale and border-radius scale
+    - Component styles (buttons, cards, inputs, shadows)
+    - Do's and Don'ts (hard rules to follow)
+    Use these as the source of truth for all CSS custom properties below.
+else:
+    Use sensible defaults (clean light theme, system fonts, blue accent)
+```
+
+Map the design system tokens to CSS custom properties:
+
+| DESIGN.md concept | CSS variable |
+|---|---|
+| Page background | `--bg` |
+| Card / secondary surface | `--bg-secondary` |
+| Elevated / tertiary surface | `--bg-tertiary` |
+| Primary body text | `--text` |
+| Secondary / muted text | `--text-secondary` |
+| Headline / bright text | `--text-bright` |
+| Brand accent (CTA, highlights) | `--accent` |
+| Lighter accent variant | `--accent-light` |
+| Success semantic color | `--green` |
+| Warning semantic color | `--orange` |
+| Error semantic color | `--red` |
+| Info semantic color | `--blue` |
+| Subtle border | `--border` |
+| Prominent border | `--border-strong` |
+| Ring / focus shadow | `--ring` |
+| Code block background | `--code-bg` |
+
+Follow the **Do's and Don'ts** section from DESIGN.md as hard rules throughout HTML generation — e.g., if it says "don't use cool blue-grays", ensure no cool-toned neutrals appear anywhere.
+
 ### Step 4.1: Generate the Base HTML Shell
 
 Write the HTML app as a single self-contained file. Architecture:
@@ -292,7 +332,7 @@ Write the HTML app as a single self-contained file. Architecture:
 ```
 
 **Required UI features**:
-- Light theme with CSS custom properties (easy to restyle) — warm parchment canvas, Claude design system
+- CSS custom properties for every design token (loaded from DESIGN.md in Step 4.0)
 - Sidebar with numbered chapter list, active/completed state
 - Mobile responsive (sidebar collapses to hamburger menu)
 - Smooth chapter transitions (fade + slide animation)
