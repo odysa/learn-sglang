@@ -916,7 +916,7 @@ multinomial(probs, 1) &rarr; token_ids</code></pre>
     <div class="bar-chart" id="samplingChart"></div>
   </div>
   <div class="controls" style="margin-top:12px;">
-    <button class="btn btn-primary" onclick="sampleTokens()">Sample 100x</button>
+    <button class="btn btn-primary" onclick="updateSampling()">Sample 100x</button>
     <button class="btn" onclick="resetSampling()">Reset Logits</button>
   </div>
   <div class="stat-row">
@@ -1201,7 +1201,7 @@ function closeSidebar() {
 }
 
 // ===== CH1: PIPELINE DEMO =====
-let pipeReqs = 0, pipeToks = 0, pipeLatencies = [];
+let pipeReqs = 0, pipeToks = 0, pipeLatencySum = 0;
 const stages = ['http','tok','sched','detok'];
 const stageTimes = [12, 45, 180, 8];
 
@@ -1224,14 +1224,13 @@ function sendRequest() {
   setTimeout(() => {
     pipeToks += toks;
     document.getElementById('stat-tokens').textContent = pipeToks;
-    pipeLatencies.push(totalMs);
-    const avg = Math.round(pipeLatencies.reduce((a,b) => a+b, 0) / pipeLatencies.length);
-    document.getElementById('stat-latency').textContent = avg;
+    pipeLatencySum += totalMs;
+    document.getElementById('stat-latency').textContent = Math.round(pipeLatencySum / pipeReqs);
   }, totalMs + 200);
 }
 
 function resetPipeline() {
-  pipeReqs = 0; pipeToks = 0; pipeLatencies = [];
+  pipeReqs = 0; pipeToks = 0; pipeLatencySum = 0;
   ['stat-reqs','stat-tokens'].forEach(id => document.getElementById(id).textContent = '0');
   document.getElementById('stat-latency').textContent = '-';
   stages.forEach(s => {
@@ -1384,7 +1383,9 @@ function radixReset() {
 function renderRadixTree() {
   const container = document.getElementById('radixTree');
   container.innerHTML = '';
+  let nodeCount = 0;
   function renderNode(node, parent) {
+    nodeCount++;
     const el = document.createElement('div');
     el.style.marginBottom = '4px';
     const nodeEl = document.createElement('span');
@@ -1401,9 +1402,6 @@ function renderRadixTree() {
     parent.appendChild(el);
   }
   renderNode(radixRoot, container);
-  let nodeCount = 0;
-  function countNodes(n) { nodeCount++; Object.values(n.children).forEach(countNodes); }
-  countNodes(radixRoot);
   document.getElementById('radix-nodes').textContent = nodeCount;
   document.getElementById('radix-tokens').textContent = radixTotalTokens;
   document.getElementById('radix-hits').textContent = radixHitTokens;
@@ -1414,15 +1412,9 @@ function renderRadixTree() {
 const TOKENS = ['the','cat','sat','on','a','mat','dog','ran','fast','big','small','red','and','is','in'];
 let rawLogits = [];
 
-function initSampling() {
-  rawLogits = TOKENS.map(() => Math.random() * 4 - 1);
-  rawLogits[0] = 3.2; rawLogits[1] = 2.1; rawLogits[3] = 1.8;
-  updateSampling();
-}
-
 function resetSampling() {
   rawLogits = TOKENS.map(() => Math.random() * 4 - 1);
-  rawLogits[0] = 3.2; rawLogits[1] = 2.1;
+  rawLogits[0] = 3.2; rawLogits[1] = 2.1; rawLogits[3] = 1.8;
   updateSampling();
 }
 
@@ -1501,15 +1493,20 @@ function updateSampling() {
   document.getElementById('samp-top').textContent = (Math.max(...filteredProbs) * 100).toFixed(0) + '%';
 }
 
-function sampleTokens() {
-  updateSampling();
-}
-
 // ===== CH12: SPECULATIVE DECODING =====
 const VOCAB = ['The','quick','brown','fox','jumps','over','lazy','dog','a','the','sat','on','mat','ran','big'];
 let specRounds = 0, specTotalAccepted = 0, specTotalDrafted = 0;
+let specPendingTimeout = null, specAutoInterval = null;
+
+function makeChip(text, cls) {
+  const chip = document.createElement('span');
+  chip.className = 'token-chip ' + cls;
+  chip.textContent = text;
+  return chip;
+}
 
 function specRun() {
+  if (specPendingTimeout) clearTimeout(specPendingTimeout);
   const acc = parseInt(document.getElementById('specAcc').value) / 100;
   const K = 5;
   const draftDiv = document.getElementById('specDraft');
@@ -1520,9 +1517,7 @@ function specRun() {
   for (let i = 0; i < K; i++) {
     const tok = VOCAB[Math.floor(Math.random() * VOCAB.length)];
     drafts.push(tok);
-    const chip = document.createElement('span');
-    chip.className = 'token-chip draft';
-    chip.textContent = tok;
+    const chip = makeChip(tok, 'draft');
     chip.id = 'draft-' + i;
     draftDiv.appendChild(chip);
   }
@@ -1532,24 +1527,20 @@ function specRun() {
     if (Math.random() < acc) { accepted++; } else break;
   }
 
-  setTimeout(() => {
+  specPendingTimeout = setTimeout(() => {
+    specPendingTimeout = null;
     for (let i = 0; i < K; i++) {
       const chip = document.getElementById('draft-' + i);
+      if (!chip) continue;
       if (i < accepted) {
         chip.className = 'token-chip accepted';
         chip.textContent = drafts[i] + ' \u2713';
-        const tChip = document.createElement('span');
-        tChip.className = 'token-chip accepted';
-        tChip.textContent = drafts[i];
-        targetDiv.appendChild(tChip);
+        targetDiv.appendChild(makeChip(drafts[i], 'accepted'));
       } else if (i === accepted) {
         chip.className = 'token-chip rejected';
         chip.textContent = drafts[i] + ' \u2717';
         const bonus = VOCAB[Math.floor(Math.random() * VOCAB.length)];
-        const bChip = document.createElement('span');
-        bChip.className = 'token-chip bonus';
-        bChip.textContent = bonus + ' (bonus)';
-        targetDiv.appendChild(bChip);
+        targetDiv.appendChild(makeChip(bonus + ' (bonus)', 'bonus'));
       } else {
         chip.className = 'token-chip rejected';
         chip.style.opacity = '0.3';
@@ -1563,24 +1554,28 @@ function specRun() {
     document.getElementById('spec-rounds').textContent = specRounds;
     document.getElementById('spec-accepted').textContent = specTotalAccepted;
     document.getElementById('spec-rate').textContent = Math.round(specTotalAccepted / specTotalDrafted * 100) + '%';
-    const avgTokens = specTotalAccepted / specRounds + 1;
-    document.getElementById('spec-speedup').textContent = avgTokens.toFixed(1) + 'x';
+    document.getElementById('spec-speedup').textContent = (specTotalAccepted / specRounds + 1).toFixed(1) + 'x';
 
     const log = document.getElementById('specLog');
-    log.innerHTML += `<div>Round ${specRounds}: Drafted ${K}, Accepted ${accepted}, Bonus 1 = ${totalTokens} tokens</div>`;
+    const entry = document.createElement('div');
+    entry.textContent = `Round ${specRounds}: Drafted ${K}, Accepted ${accepted}, Bonus 1 = ${totalTokens} tokens`;
+    log.appendChild(entry);
     log.scrollTop = log.scrollHeight;
   }, 400);
 }
 
 function specAuto() {
+  if (specAutoInterval) { clearInterval(specAutoInterval); specAutoInterval = null; }
   let i = 0;
-  const interval = setInterval(() => {
-    if (i >= 10) { clearInterval(interval); return; }
+  specAutoInterval = setInterval(() => {
+    if (i >= 10) { clearInterval(specAutoInterval); specAutoInterval = null; return; }
     specRun(); i++;
   }, 600);
 }
 
 function specReset() {
+  if (specPendingTimeout) { clearTimeout(specPendingTimeout); specPendingTimeout = null; }
+  if (specAutoInterval) { clearInterval(specAutoInterval); specAutoInterval = null; }
   specRounds = 0; specTotalAccepted = 0; specTotalDrafted = 0;
   ['spec-rounds','spec-accepted'].forEach(id => document.getElementById(id).textContent = '0');
   ['spec-rate','spec-speedup'].forEach(id => document.getElementById(id).textContent = '-');
@@ -1592,7 +1587,7 @@ function specReset() {
 // ===== INIT =====
 initSidebar();
 initMemGrid();
-initSampling();
+resetSampling();
 renderRadixTree();
 goChapter(1);
 </script>
